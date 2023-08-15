@@ -1,0 +1,198 @@
+service: poc-kinesis-base
+
+custom:
+  repo: awsdaypa2023
+  streamName: poc-k-stream
+  bucketDestName: poc-k-dest-${param:account}
+  bucketBackupName: poc-k-backup-${param:account}
+  glueDbName: poc-k-gdb
+  glueTbName: poc-k-gtb-logs
+  roleName: poc-k-role-fh
+  lambdaTranfName: poc-k-logs-transf
+  firehoseName: poc-k-processor
+
+provider:
+  name: aws
+  region: ${param:region}
+  stackName: ${self:service}-${param:account}
+  runtime: python3.9
+  timeout: 60
+  memorySize: 512
+  stackTags:
+    repository: ${self:custom.repo}
+
+functions:
+  lbd:
+    name: ${self:custom.lambdaTranfName}
+    handler: src/lambda_function.lambda_handler
+
+package:
+  include:
+    - src/**
+
+resources:
+  Resources:
+    KinesisStream:
+      Type: AWS::Kinesis::Stream
+      Properties:
+        Name: ${self:custom.streamName}
+        RetentionPeriodHours: 24
+        ShardCount: 1
+        StreamModeDetails:
+          StreamMode: PROVISIONED
+      DependsOn:
+        - LbdLambdaFunction
+    BucketDest:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucketDestName}
+    BucketBackup:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucketBackupName}
+    GlueDatabase:
+      Type: AWS::Glue::Database
+      Properties:
+        CatalogId: ${param:account}
+        DatabaseInput:
+          Name: ${self:custom.glueDbName}
+    GlueTable:
+      Type: AWS::Glue::Table
+      Properties:
+        CatalogId: ${param:account}
+        DatabaseName: !Ref GlueDatabase
+        TableInput:
+          Name: ${self:custom.glueTbName}
+          Owner: owner
+          Retention: 0
+          TableType: EXTERNAL_TABLE
+          StorageDescriptor:
+            Columns: 
+              - Name: logstream
+                Type: string
+              - Name: msg
+                Type: string
+            Location: !Join
+                        - ""
+                        - - "s3://"
+                          - !Ref BucketDest
+                          - "/" 
+            Compressed: false
+            InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+            NumberOfBuckets: -1
+            OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+            SerdeInfo: 
+              SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+            StoredAsSubDirectories: false
+      DependsOn:
+        - GlueDatabase
+        - BucketDest 
+    FirehoseRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:custom.roleName}
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: 
+              - "sts:AssumeRole"
+        Policies: 
+          - PolicyName: AllowAccess
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                  Resource:
+                  - arn:aws:s3:::${self:custom.bucketDestName}
+                  - arn:aws:s3:::${self:custom.bucketDestName}/*
+                  - arn:aws:s3:::${self:custom.bucketBackupName}
+                  - arn:aws:s3:::${self:custom.bucketBackupName}/*
+                - Effect: Allow
+                  Action:
+                  - kinesis:DescribeStream
+                  - kinesis:GetShardIterator
+                  - kinesis:GetRecords
+                  - kinesis:ListShards
+                  Resource: !GetAtt KinesisStream.Arn
+                - Effect: Allow
+                  Action:
+                  - logs:PutLogEvents
+                  Resource:
+                  - "*"
+                - Effect: Allow
+                  Action:
+                  - lambda:InvokeFunction
+                  - lambda:GetFunctionConfiguration
+                  Resource:
+                  - arn:aws:lambda:${param:region}:${param:account}:function:${self:custom.lambdaTranfName}
+                - Effect: Allow
+                  Action:
+                  - glue:GetTable
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                  - glue:GetSchemaByDefinition
+                  - glue:GetSchemaVersion
+                  Resource: "*"
+      DependsOn:
+        - KinesisStream
+        - BucketDest
+        - GlueTable
+    Firehose:
+      Type: AWS::KinesisFirehose::DeliveryStream
+      Properties:
+        DeliveryStreamName: ${self:custom.firehoseName}
+        DeliveryStreamType: KinesisStreamAsSource
+        KinesisStreamSourceConfiguration:
+          KinesisStreamARN: !GetAtt KinesisStream.Arn
+          RoleARN: !GetAtt FirehoseRole.Arn
+        ExtendedS3DestinationConfiguration:
+          BucketARN: !GetAtt BucketDest.Arn
+          CompressionFormat: UNCOMPRESSED
+          RoleARN: !GetAtt FirehoseRole.Arn
+          ProcessingConfiguration:
+            Enabled: true
+            Processors:
+              - Parameters:
+                  - ParameterName: LambdaArn
+                    ParameterValue: !GetAtt LbdLambdaFunction.Arn
+                Type: Lambda
+          DataFormatConversionConfiguration:
+            Enabled: true
+            InputFormatConfiguration: 
+              Deserializer:
+                OpenXJsonSerDe: {}
+            OutputFormatConfiguration: 
+              Serializer:
+                ParquetSerDe: {}
+            SchemaConfiguration: 
+              CatalogId: ${param:account}
+              DatabaseName: !Ref GlueDatabase
+              RoleARN: !GetAtt FirehoseRole.Arn
+              TableName: !Ref GlueTable
+          BufferingHints:
+            IntervalInSeconds: 60
+            SizeInMBs: 128
+          S3BackupMode: Disabled
+          S3BackupConfiguration:
+            BucketARN: !GetAtt BucketBackup.Arn
+            RoleARN: !GetAtt FirehoseRole.Arn
+      DependsOn:
+        - FirehoseRole
+        - BucketDest
+        - BucketBackup
+
+
+
+        
+            
+    

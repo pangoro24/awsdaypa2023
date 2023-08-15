@@ -1,0 +1,61 @@
+service: poc-kinesis-producer
+
+custom:
+  repo: awsdaypa2023
+  roleName: poc-k-role-sub
+  lambdaName: poc-k-logs-producer
+
+provider:
+  name: aws
+  region: ${param:region}
+  stackName: ${self:service}-${param:account}
+  runtime: python3.9
+  timeout: 25
+  memorySize: 512
+  stackTags:
+    repository: ${self:custom.repo}
+
+functions:
+  lbd:
+    name: ${self:custom.lambdaName}
+    handler: src/lambda_function.lambda_handler
+
+package:
+  include:
+    - src/**
+
+resources:
+  Resources:
+    LogSubRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:custom.roleName}
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action: 
+              - "sts:AssumeRole"
+        Policies: 
+          - PolicyName: AllowAccess
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                  - kinesis:*
+                  Resource:
+                  - "*"
+    LbdLogSub:
+      Type: AWS::Logs::SubscriptionFilter
+      Properties:
+        DestinationArn: arn:aws:kinesis:${param:region}:${param:account}:stream/${param:streamName}
+        FilterName: "filter-info"
+        FilterPattern: '"[INFO]"'
+        LogGroupName: /aws/lambda/${self:custom.lambdaName}
+        RoleArn: !GetAtt LogSubRole.Arn
+      DependsOn:
+        - LbdLambdaFunction
+        - LogSubRole
