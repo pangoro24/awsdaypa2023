@@ -182,7 +182,7 @@ resources:
           BufferingHints:
             IntervalInSeconds: 60
             SizeInMBs: 128
-          S3BackupMode: Disabled
+          S3BackupMode: Enabled
           S3BackupConfiguration:
             BucketARN: !GetAtt BucketBackup.Arn
             RoleARN: !GetAtt FirehoseRole.Arn
